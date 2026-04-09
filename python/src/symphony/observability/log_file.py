@@ -22,9 +22,9 @@ def setup_logging(
         logs_root: Directory for log files. If None, logs only go to console.
         level: Logging level.
     """
-    processors: list = [  # type: ignore[type-arg]
+    # Base processors that don't require a logger instance
+    base_processors: list = [  # type: ignore[type-arg]
         structlog.contextvars.merge_contextvars,
-        structlog.stdlib.filter_by_level,
         structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
         structlog.stdlib.PositionalArgumentsFormatter(),
@@ -33,6 +33,11 @@ def setup_logging(
         structlog.processors.format_exc_info,
         structlog.processors.UnicodeDecoder(),
     ]
+
+    # Processors for structlog's internal use (including filter_by_level)
+    structlog_processors: list = [  # type: ignore[type-arg]
+        structlog.stdlib.filter_by_level,
+    ] + base_processors
 
     handlers: list[logging.Handler] = []
 
@@ -56,11 +61,11 @@ def setup_logging(
         handlers.append(file_handler)
 
         # JSON formatter for file output
-        processors_for_file = processors + [
+        processors_for_file = structlog_processors + [
             structlog.processors.JSONRenderer(),
         ]
     else:
-        processors_for_file = processors
+        processors_for_file = structlog_processors
 
     # Configure structlog
     structlog.configure(
@@ -81,7 +86,7 @@ def setup_logging(
             processor=structlog.dev.ConsoleRenderer()
             if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.handlers.RotatingFileHandler)
             else structlog.processors.JSONRenderer(),
-            foreign_pre_chain=processors,
+            foreign_pre_chain=base_processors,
         )
         handler.setFormatter(formatter)
         root_logger.addHandler(handler)
