@@ -22,24 +22,51 @@ def setup_logging(
         logs_root: Directory for log files. If None, logs only go to console.
         level: Logging level.
     """
+    # Base processors for structlog
     processors: list = [  # type: ignore[type-arg]
         structlog.contextvars.merge_contextvars,
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.PositionalArgumentsFormatter(),
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.UnicodeDecoder(),
+        # Add the wrap processor for structlog
+        structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+    ]
+
+    # Configure structlog first
+    structlog.configure(
+        processors=processors,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=True,
+    )
+
+    # Configure standard logging
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+
+    # Processors for foreign logs (from stdlib and other libraries)
+    foreign_pre_chain = [
         structlog.stdlib.filter_by_level,
         structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
         structlog.stdlib.PositionalArgumentsFormatter(),
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.StackInfoRenderer(),
-        structlog.processors.format_exc_info,
         structlog.processors.UnicodeDecoder(),
     ]
-
-    handlers: list[logging.Handler] = []
 
     # Console handler
     console_handler = logging.StreamHandler()
     console_handler.setLevel(level)
-    handlers.append(console_handler)
+    console_formatter = structlog.stdlib.ProcessorFormatter(
+        processor=structlog.dev.ConsoleRenderer(),
+        foreign_pre_chain=foreign_pre_chain,
+    )
+    console_handler.setFormatter(console_formatter)
+    root_logger.addHandler(console_handler)
 
     # File handler (if logs_root specified)
     if logs_root:
@@ -53,35 +80,11 @@ def setup_logging(
             backupCount=5,
         )
         file_handler.setLevel(level)
-        handlers.append(file_handler)
 
         # JSON formatter for file output
-        processors_for_file = processors + [
-            structlog.processors.JSONRenderer(),
-        ]
-    else:
-        processors_for_file = processors
-
-    # Configure structlog
-    structlog.configure(
-        processors=processors_for_file + [
-            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
-        ],
-        logger_factory=structlog.stdlib.LoggerFactory(),
-        wrapper_class=structlog.stdlib.BoundLogger,
-        cache_logger_on_first_use=True,
-    )
-
-    # Configure standard logging
-    root_logger = logging.getLogger()
-    root_logger.setLevel(level)
-
-    for handler in handlers:
-        formatter = structlog.stdlib.ProcessorFormatter(
-            processor=structlog.dev.ConsoleRenderer()
-            if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.handlers.RotatingFileHandler)
-            else structlog.processors.JSONRenderer(),
-            foreign_pre_chain=processors,
+        file_formatter = structlog.stdlib.ProcessorFormatter(
+            processor=structlog.processors.JSONRenderer(),
+            foreign_pre_chain=foreign_pre_chain,
         )
-        handler.setFormatter(formatter)
-        root_logger.addHandler(handler)
+        file_handler.setFormatter(file_formatter)
+        root_logger.addHandler(file_handler)
