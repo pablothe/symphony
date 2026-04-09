@@ -16,9 +16,14 @@ from typing import Callable
 
 from symphony.config.config import settings
 from symphony.models.issue import Issue
+from symphony.observability.status_dashboard import log_activity
 from symphony.ssh import client as ssh_client
 
 logger = logging.getLogger(__name__)
+
+
+def _truncate(s: str, max_len: int) -> str:
+    return s if len(s) <= max_len else s[:max_len] + "..."
 
 
 @dataclass
@@ -52,6 +57,7 @@ class ClaudeCodeSession:
         self.worker_host = worker_host
         self._process: asyncio.subprocess.Process | None = None
         self._turn_count = 0
+        self._resume_session_id: str | None = None
 
     async def run_turn(
         self,
@@ -88,6 +94,10 @@ class ClaudeCodeSession:
                 stdout, stderr, exit_code = await self._run_local(prompt, turn_timeout_s)
 
             result = self._parse_output(stdout, stderr, exit_code, session_id)
+
+            # Save session ID from Claude's response for resuming on next turn
+            if result.session_id:
+                self._resume_session_id = result.session_id
 
             if on_update:
                 on_update({
@@ -142,7 +152,7 @@ class ClaudeCodeSession:
     async def _run_local(
         self, prompt: str, timeout_s: float
     ) -> tuple[bytes, bytes, int]:
-        """Run Claude Code locally as a subprocess."""
+        """Run Claude Code locally as a subprocess with streaming output."""
         cmd = self._build_command()
         logger.info("Running Claude Code: %s", " ".join(cmd))
 
@@ -154,12 +164,54 @@ class ClaudeCodeSession:
             cwd=self.workspace,
         )
 
-        stdout, stderr = await asyncio.wait_for(
-            self._process.communicate(input=prompt.encode("utf-8")),
-            timeout=timeout_s,
-        )
+        # Send prompt and close stdin
+        assert self._process.stdin is not None
+        self._process.stdin.write(prompt.encode("utf-8"))
+        await self._process.stdin.drain()
+        self._process.stdin.close()
+        await self._process.stdin.wait_closed()
 
-        return stdout, stderr, self._process.returncode or 0
+        # Stream stdout line by line, collecting the last result line
+        last_line = b""
+        assert self._process.stdout is not None
+        async with asyncio.timeout(timeout_s):
+            async for line in self._process.stdout:
+                last_line = line
+                self._log_stream_event(line)
+
+        stderr = b""
+        if self._process.stderr:
+            stderr = await self._process.stderr.read()
+
+        await self._process.wait()
+        return last_line, stderr, self._process.returncode or 0
+
+    def _log_stream_event(self, line: bytes) -> None:
+        """Log a streaming JSON event from Claude Code to the dashboard."""
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            return
+
+        event_type = event.get("type")
+        if event_type == "assistant":
+            msg = event.get("message", {})
+            for block in msg.get("content", []):
+                if block.get("type") == "text" and block.get("text"):
+                    log_activity(f"[white]{_truncate(block['text'], 200)}[/white]")
+                elif block.get("type") == "tool_use":
+                    log_activity(
+                        f"[cyan]tool:[/cyan] {block.get('name', '?')}"
+                        f"([dim]{_truncate(json.dumps(block.get('input', {})), 120)}[/dim])"
+                    )
+        elif event_type == "tool_result":
+            content = event.get("content", "")
+            if isinstance(content, str) and content:
+                log_activity(f"[green]result:[/green] [dim]{_truncate(content, 150)}[/dim]")
+        elif event_type == "result":
+            result_text = event.get("result", "")
+            if result_text:
+                log_activity(f"[bold green]done:[/bold green] {_truncate(str(result_text), 200)}")
 
     async def _run_remote(
         self, prompt: str, timeout_s: float
@@ -183,7 +235,10 @@ class ClaudeCodeSession:
     def _build_command(self) -> list[str]:
         """Build the Claude Code CLI command."""
         config = settings().claude_code
-        cmd = [config.command, "--print", "--output-format", "json"]
+        cmd = [config.command, "--print", "--verbose", "--output-format", "stream-json"]
+
+        if self._resume_session_id:
+            cmd.extend(["--resume", self._resume_session_id])
 
         if config.model:
             cmd.extend(["--model", config.model])
@@ -230,6 +285,10 @@ class ClaudeCodeSession:
         try:
             data = json.loads(output_str)
             result.raw_json = data
+
+            # Extract session ID from Claude's response for --resume
+            if data.get("session_id"):
+                result.session_id = data["session_id"]
 
             # Extract token usage from Claude Code JSON output
             usage = data.get("usage", {})

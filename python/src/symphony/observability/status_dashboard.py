@@ -6,12 +6,15 @@ Displays running agents, token throughput, retry queue, and polling status.
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
+import logging.handlers
 import time
 from typing import TYPE_CHECKING
 
-from rich.console import Console
+from rich.console import Console, Group
 from rich.live import Live
+from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
@@ -19,6 +22,15 @@ if TYPE_CHECKING:
     from symphony.orchestrator.orchestrator import Orchestrator
 
 logger = logging.getLogger(__name__)
+
+# Module-level activity log shared between dashboard and claude_code streaming.
+_activity_log: collections.deque[str] = collections.deque(maxlen=20)
+
+
+def log_activity(message: str) -> None:
+    """Append a line to the dashboard activity log."""
+    timestamp = time.strftime("%H:%M:%S")
+    _activity_log.append(f"[dim]{timestamp}[/dim] {message}")
 
 
 class StatusDashboard:
@@ -51,15 +63,30 @@ class StatusDashboard:
 
     async def _render_loop(self) -> None:
         """Periodically render the dashboard."""
+        # Suppress console log output while dashboard is active to avoid
+        # interleaving log lines with the Rich Live display.
+        root_logger = logging.getLogger()
+        original_handlers = root_logger.handlers[:]
+        console_handlers = [
+            h for h in root_logger.handlers
+            if isinstance(h, logging.StreamHandler)
+            and not isinstance(h, logging.handlers.RotatingFileHandler)
+        ]
+        for h in console_handlers:
+            root_logger.removeHandler(h)
+
         try:
-            with Live(self._build_display(), console=self._console, refresh_per_second=1) as live:
+            with Live(self._build_display(), console=self._console, refresh_per_second=2) as live:
                 while True:
                     await asyncio.sleep(self._refresh_interval)
                     live.update(self._build_display())
         except asyncio.CancelledError:
             pass
+        finally:
+            # Restore handlers on shutdown
+            root_logger.handlers = original_handlers
 
-    def _build_display(self) -> Table:
+    def _build_display(self) -> Group:
         """Build the dashboard display table."""
         snapshot = self._orchestrator.snapshot()
         uptime = time.time() - self._start_time
@@ -135,7 +162,14 @@ class StatusDashboard:
 
             main.add_row(retry_table)
 
-        return main
+        # Activity log panel
+        if _activity_log:
+            log_text = Text.from_markup("\n".join(_activity_log))
+            main.add_row(Panel(log_text, title="Agent Activity", border_style="dim"))
+        else:
+            main.add_row(Panel(Text("Waiting for agent output...", style="dim"), title="Agent Activity", border_style="dim"))
+
+        return Group(main)
 
 
 def _format_duration(seconds: float) -> str:

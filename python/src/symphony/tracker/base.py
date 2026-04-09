@@ -21,3 +21,11 @@ class TrackerProtocol(Protocol):
     async def fetch_issue_states_by_ids(self, ids: list[str]) -> list[Issue]:
         """Fetch current states for specific issue IDs (reconciliation)."""
         ...
+
+    async def create_comment(self, issue_id: str, body: str) -> None:
+        """Create a comment on an issue."""
+        ...
+
+    async def update_issue_state(self, issue_id: str, state_name: str) -> None:
+        """Update an issue's workflow state."""
+        ...

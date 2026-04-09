@@ -10,6 +10,7 @@ class MemoryTracker:
 
     def __init__(self, issues: list[Issue] | None = None):
         self._issues = list(issues or [])
+        self._comments: list[tuple[str, str]] = []
 
     def set_issues(self, issues: list[Issue]) -> None:
         self._issues = list(issues)
@@ -17,11 +18,18 @@ class MemoryTracker:
     def add_issue(self, issue: Issue) -> None:
         self._issues.append(issue)
 
-    def update_issue_state(self, issue_id: str, new_state: str) -> None:
+    def set_issue_state(self, issue_id: str, new_state: str) -> None:
+        """Synchronous state update for direct test manipulation."""
         for issue in self._issues:
             if issue.id == issue_id:
                 issue.state = new_state
                 break
+
+    async def update_issue_state(self, issue_id: str, state_name: str) -> None:
+        self.set_issue_state(issue_id, state_name)
+
+    async def create_comment(self, issue_id: str, body: str) -> None:
+        self._comments.append((issue_id, body))
 
     async def fetch_candidate_issues(self) -> list[Issue]:
         return list(self._issues)

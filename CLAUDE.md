@@ -1,9 +1,56 @@
-# Symphony
+# CLAUDE.md
 
-Symphony is an autonomous work orchestration service that continuously polls
-Linear for candidate issues, creates isolated per-issue workspaces, launches
-Codex (an AI coding agent) to implement each task, and manages the full agent
-lifecycle including retries, concurrency, and cleanup.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+Symphony is an autonomous work orchestration service that polls Linear for issues, creates isolated per-issue workspaces, launches an AI coding agent (Codex for Elixir, Claude Code for Python) to implement each task, and manages agent lifecycle including retries, concurrency, and cleanup.
+
+There are two independent implementations: **Elixir** (primary, with CI) and **Python**.
+
+## Build & Test Commands
+
+### Elixir (`cd elixir`)
+
+```bash
+mise trust && mise install          # install Erlang 28 + Elixir 1.19.x
+mix setup                           # fetch deps
+mix build                           # creates bin/symphony (escript)
+./bin/symphony ./WORKFLOW.md        # run with a workflow file
+
+# Testing
+mix test                            # all tests
+mix test test/symphony_elixir/core_test.exs        # single file
+mix test test/symphony_elixir/core_test.exs:42     # single test at line
+
+# Quality gates
+make all                            # full CI: fmt-check, lint, coverage (100%), dialyzer
+make fmt                            # auto-format
+make fmt-check                      # check formatting (CI uses this)
+make lint                           # mix specs.check + mix credo --strict
+make coverage                       # mix test --cover (enforces 100% threshold)
+make dialyzer                       # static type analysis
+make e2e                            # live e2e test (needs LINEAR_API_KEY, SYMPHONY_LIVE_LINEAR_TEAM_KEY)
+```
+
+### Python (`cd python`)
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+
+# Run
+symphony WORKFLOW.md                # or: python -m symphony WORKFLOW.md
+
+# Testing
+pytest tests/ -v                    # all tests
+pytest tests/test_foo.py            # single file
+pytest -k "test_name"              # single test by name
+
+# Lint & type check
+ruff check src/ tests/              # lint (line length 100)
+mypy src/                           # strict mode, Python 3.11
+```
 
 ## Architecture
 
@@ -14,175 +61,84 @@ lifecycle including retries, concurrency, and cleanup.
                                  │ GraphQL
                                  ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  Orchestrator (GenServer)                                       │
-│                                                                 │
+│  Orchestrator                                                   │
 │  poll tick ──► fetch candidates ──► dispatch eligible issues     │
 │       ▲                                    │                    │
 │       │                                    ▼                    │
-│  :DOWN signal ◄──────────────────  AgentRunner (Task)           │
-│  (retry / complete)                  │          │               │
+│  completion ◄────────────────────  AgentRunner                  │
+│  (retry / done)                      │          │               │
 │                                      ▼          ▼               │
-│                               Workspace    Codex AppServer      │
-│                              (filesystem)  (JSON-RPC stdio)     │
-│                                                 │               │
-│                                                 ▼               │
-│                                          Codex subprocess       │
-│                                          (app-server mode)      │
+│                               Workspace    AI Agent             │
+│                              (filesystem)  (Codex / Claude)     │
 └─────────────────────────────────────────────────────────────────┘
         │                        │
         ▼                        ▼
-  StatusDashboard           HttpServer
-  (terminal UI)         (Phoenix LiveView
-                         + JSON API)
+  StatusDashboard           Web Server
+  (terminal UI)         (LiveView / FastAPI)
 ```
 
-## Core Components
+### Elixir Implementation
 
-All source files live under `elixir/lib/symphony_elixir/` unless noted otherwise.
+OTP/GenServer-based. Source: `elixir/lib/symphony_elixir/`.
 
-### Orchestrator (`orchestrator.ex`)
+- **Orchestrator** (`orchestrator.ex`) — GenServer polling loop, dispatch, retry with exponential backoff
+- **AgentRunner** (`agent_runner.ex`) — per-issue lifecycle: workspace → prompt → Codex turns → completion
+- **Codex integration** (`codex/app_server.ex`) — JSON-RPC 2.0 over stdio; `codex/dynamic_tool.ex` for runtime tools
+- **Workflow** (`workflow.ex`, `workflow_store.ex`) — parses WORKFLOW.md (YAML front matter + Liquid template body), hot-reloads at runtime
+- **Config** (`config.ex`, `config/schema.ex`) — Ecto-based typed config with env var expansion
+- **Linear** (`linear/client.ex`, `linear/adapter.ex`) — GraphQL client + response normalization
+- **Workspace** (`workspace.ex`, `path_safety.ex`) — per-issue directory isolation, SSH support via `ssh.ex`
+- **Web** (`symphony_elixir_web/`) — Phoenix LiveView dashboard at `/`, JSON API at `/api/v1/*`
 
-Central GenServer running the main polling loop. Polls Linear on a configurable
-cadence (default 30s), reconciles running agents against current issue states,
-dispatches eligible issues up to the concurrency limit, and handles agent
-completion with exponential backoff retries.
+OTP supervision tree: PubSub, Task.Supervisor (AgentRunner tasks), WorkflowStore, Orchestrator, HttpServer, StatusDashboard.
 
-### Workflow & Config
+### Python Implementation
 
-- `workflow.ex` — Parses `WORKFLOW.md`: YAML front matter (config) + Markdown body (prompt template)
-- `workflow_store.ex` — GenServer holding the current workflow with hot-reload support
-- `config.ex` — Type-safe getters with defaults and env var expansion
-- `config/schema.ex` — Ecto-based schema defining all config fields and validation
+asyncio-based. Source: `python/src/symphony/`.
 
-### Issue Tracking (Linear)
+- Uses Claude Code (not Codex) via `claude --print --output-format json`
+- Config key is `claude_code:` (not `codex:`), Jinja2 templates (not Liquid), Pydantic models
+- FastAPI + WebSocket for web, Rich for terminal UI
 
-- `tracker.ex` — Abstract behaviour for tracker implementations
-- `tracker/memory.ex` — In-memory tracker for tests
-- `linear/client.ex` — GraphQL client with paginated queries and mutations
-- `linear/adapter.ex` — Normalizes Linear API responses to a stable internal model
-- `linear/issue.ex` — Issue struct: id, identifier, title, description, state, labels, etc.
+### Key Design Decisions
 
-### Workspace (`workspace.ex`)
+- **Workspace isolation** — each issue gets its own directory, never run agent in source repo
+- **Exponential backoff** — `base * 2^(attempt-1)` capped at configurable max
+- **WORKFLOW.md** — config + prompt template version-controlled together; hot-reload preserves last good config on failure
 
-Per-issue filesystem isolation. Maps issue identifiers to directories, creates
-them with `hooks.after_create` (e.g. `git clone`), validates paths stay under
-the configured root (`path_safety.ex`), and supports SSH remote hosts.
+## Coding Conventions
 
-### Agent Execution
+### Elixir
 
-- `agent_runner.ex` — Full lifecycle for a single issue: create workspace → build prompt → run Codex turns → handle completion
-- `prompt_builder.ex` — Renders the WORKFLOW.md body as a Liquid template with issue context
-- `ssh.ex` — Remote workspace execution over SSH
+- All public `def` functions in `lib/` must have an adjacent `@spec` (enforced by `mix specs.check`). `defp` and `@impl` callbacks are exempt.
+- Config access through `SymphonyElixir.Config` — no ad-hoc env reads.
+- Follow `elixir/docs/logging.md` for logging conventions and required issue/session context fields.
+- Tests use `use SymphonyElixir.TestSupport` and `SymphonyElixir.Tracker.Memory` (in-memory tracker) to avoid real Linear calls.
+- Keep implementation aligned with `SPEC.md` — may be a superset but must not conflict.
 
-### Codex Integration
+### Python
 
-- `codex/app_server.ex` — JSON-RPC 2.0 client over stdio managing Codex session lifecycle
-- `codex/dynamic_tool.ex` — Runtime tools exposed to Codex (e.g. `linear_graphql` for raw GraphQL calls)
+- Strict mypy, ruff linting (rules: E, F, I, N, W, UP), line length 100.
+- asyncio_mode = "auto" for pytest-asyncio.
 
-### Observability
+## PR Requirements
 
-- `status_dashboard.ex` — Terminal UI: running agents, token throughput, retry queue
-- `http_server.ex` — Optional Phoenix endpoint
-- `symphony_elixir_web/` — LiveView dashboard at `/`, JSON API at `/api/v1/*`
-- `log_file.ex` — Structured logging with issue/session context
-
-## Execution Flow
-
-1. **Poll** — Orchestrator fetches issues in configured `active_states` from Linear
-2. **Filter** — Skip issues already running, claimed this cycle, or blocked
-3. **Dispatch** — If a concurrency slot is available, spawn an AgentRunner task
-4. **Workspace** — Create isolated directory, run `after_create` hook
-5. **Prompt** — Render WORKFLOW.md template with issue data
-6. **Session** — Spawn Codex subprocess, start JSON-RPC session
-7. **Turn loop** — Codex works on the issue for up to `agent.max_turns` turns
-8. **Completion** — AgentRunner returns result to Orchestrator
-9. **Reconcile** — Check issue state: still active → retry with backoff; terminal → cleanup
-10. **Repeat**
-
-## OTP Supervision Tree
-
-```
-Application
-├── Phoenix.PubSub          — inter-process messaging
-├── Task.Supervisor          — managed spawning of AgentRunner tasks
-├── WorkflowStore            — loads and watches WORKFLOW.md
-├── Orchestrator             — main polling loop
-├── HttpServer               — optional Phoenix endpoint
-└── StatusDashboard          — terminal UI rendering
-```
-
-## Build & Test
-
-```bash
-cd elixir
-mise trust && mise install
-mix setup
-mix build                    # creates bin/symphony
-./bin/symphony ./WORKFLOW.md # run with a workflow file
-```
-
-```bash
-make all       # full CI: format check, lint, dialyzer, tests with 100% coverage
-make test      # unit tests only
-make e2e       # live end-to-end test (requires LINEAR_API_KEY)
-```
+- PR body must follow `.github/pull_request_template.md` exactly (Context, TL;DR, Summary, Alternatives, Test Plan sections).
+- Validate locally: `mix pr_body.check --file /path/to/pr_body.md`
+- If behavior/config changes, update docs in the same PR: root `README.md`, `elixir/README.md`, `elixir/WORKFLOW.md`.
 
 ## Environment Variables
 
-- `LINEAR_API_KEY` — Required for Linear API access
-- `SYMPHONY_WORKSPACE_ROOT` — Custom workspace directory (default: `~/code/symphony-workspaces`)
-- `CODEX_BIN` — Path to Codex binary (default: `codex`)
-
-## Key Design Decisions
-
-- **Elixir/OTP** — BEAM provides lightweight processes, supervision trees, and hot code reloading for managing many concurrent long-running agents
-- **Workspace isolation** — Each issue gets its own directory preventing cross-contamination
-- **Exponential backoff** — Failed agents retry with `base * 2^(attempt-1)` capped at a configurable max
-- **WORKFLOW.md** — Config and prompt templates version-controlled in-repo alongside the code
-- **Hot-reload** — WorkflowStore watches WORKFLOW.md; failed reloads preserve last good config
-
-## Directory Structure
-
-```
-elixir/lib/
-├── symphony_elixir.ex                   # Application entry point
-├── symphony_elixir/
-│   ├── orchestrator.ex                  # Core polling loop & dispatch
-│   ├── agent_runner.ex                  # Per-issue agent lifecycle
-│   ├── workspace.ex                     # Workspace directory management
-│   ├── workflow.ex                      # WORKFLOW.md parser
-│   ├── workflow_store.ex                # Config hot-reload GenServer
-│   ├── config.ex                        # Typed config access
-│   ├── config/schema.ex                 # Config validation schema
-│   ├── tracker.ex                       # Tracker behaviour
-│   ├── tracker/memory.ex                # In-memory tracker (tests)
-│   ├── linear/
-│   │   ├── client.ex                    # Linear GraphQL client
-│   │   ├── adapter.ex                   # Response normalization
-│   │   └── issue.ex                     # Issue data model
-│   ├── codex/
-│   │   ├── app_server.ex                # Codex JSON-RPC client
-│   │   └── dynamic_tool.ex              # Runtime tools for Codex
-│   ├── prompt_builder.ex                # Liquid template rendering
-│   ├── status_dashboard.ex              # Terminal UI
-│   ├── http_server.ex                   # Phoenix server startup
-│   ├── log_file.ex                      # Structured file logging
-│   ├── path_safety.ex                   # Workspace path validation
-│   ├── ssh.ex                           # Remote execution over SSH
-│   └── cli.ex                           # CLI argument parsing
-├── symphony_elixir_web/
-│   ├── router.ex                        # HTTP routes
-│   ├── endpoint.ex                      # Phoenix endpoint
-│   ├── presenter.ex                     # State presentation
-│   ├── live/                            # LiveView components
-│   └── controllers/                     # API & asset controllers
-└── mix/tasks/                           # Custom Mix tasks
-```
+- `LINEAR_API_KEY` — required for Linear API access
+- `SYMPHONY_WORKSPACE_ROOT` — custom workspace directory (default: `~/code/symphony-workspaces`)
+- `CODEX_BIN` — path to Codex binary (default: `codex`)
+- `SYMPHONY_LIVE_LINEAR_TEAM_KEY` — e2e test team key (default: `SYME2E`)
 
 ## References
 
-- [SPEC.md](SPEC.md) — Language-agnostic specification
-- [elixir/README.md](elixir/README.md) — Setup, configuration, and usage guide
-- [elixir/WORKFLOW.md](elixir/WORKFLOW.md) — Example workflow configuration
-- [elixir/docs/logging.md](elixir/docs/logging.md) — Logging conventions
-- [elixir/docs/token_accounting.md](elixir/docs/token_accounting.md) — Token usage tracking
+- [SPEC.md](SPEC.md) — language-agnostic specification
+- [elixir/README.md](elixir/README.md) — Elixir setup, configuration, and usage
+- [elixir/WORKFLOW.md](elixir/WORKFLOW.md) — example workflow configuration
+- [elixir/docs/logging.md](elixir/docs/logging.md) — logging conventions
+- [elixir/docs/token_accounting.md](elixir/docs/token_accounting.md) — token usage tracking
+- [python/README.md](python/README.md) — Python implementation details

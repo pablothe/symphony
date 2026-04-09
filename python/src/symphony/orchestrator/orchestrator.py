@@ -303,6 +303,14 @@ class Orchestrator:
                 entry.workspace_path = info.get("workspace_path")
                 entry.worker_host = info.get("worker_host")
 
+        # Post start comment and move to In Progress
+        issue_id = issue.id or ""
+        await self._safe_update_state(issue_id, "In Progress")
+        await self._safe_comment(
+            issue_id,
+            "🤖 Symphony agent started working on this issue.",
+        )
+
         await agent_runner.run(
             issue=issue,
             tracker=self._tracker,
@@ -343,7 +351,15 @@ class Orchestrator:
         if "session_id" in update:
             entry.session_id = update["session_id"]
         if "turn_number" in update:
+            prev_turn = entry.turn_count
             entry.turn_count = update["turn_number"]
+            if update["turn_number"] > prev_turn:
+                asyncio.create_task(
+                    self._safe_comment(
+                        issue_id,
+                        f"🤖 Progress update: completed turn {update['turn_number']}.",
+                    )
+                )
 
         self._notify_state_change()
 
@@ -376,6 +392,13 @@ class Orchestrator:
                 logger.error("Agent task failed for %s: %s", entry.identifier, error)
 
             if error:
+                # Post error comment
+                short_error = (error or "unknown")[:200]
+                await self._safe_comment(
+                    issue_id,
+                    f"🤖 Symphony agent encountered an error: {short_error}",
+                )
+
                 # Schedule retry with backoff
                 attempt = 1
                 # Check if there was a previous retry
@@ -384,6 +407,10 @@ class Orchestrator:
 
                 self._schedule_retry(issue_id, entry.identifier, attempt, error)
             else:
+                await self._safe_comment(
+                    issue_id,
+                    "🤖 Symphony agent completed work on this issue.",
+                )
                 logger.info("Agent task completed for %s", entry.identifier)
 
         self._notify_state_change()
@@ -495,6 +522,20 @@ class Orchestrator:
             )
         except asyncio.TimeoutError:
             pass
+
+    async def _safe_comment(self, issue_id: str, body: str) -> None:
+        """Post a comment on a Linear issue, swallowing errors."""
+        try:
+            await self._tracker.create_comment(issue_id, body)
+        except Exception:
+            logger.warning("Failed to post comment on %s", issue_id, exc_info=True)
+
+    async def _safe_update_state(self, issue_id: str, state_name: str) -> None:
+        """Update issue state on Linear, swallowing errors."""
+        try:
+            await self._tracker.update_issue_state(issue_id, state_name)
+        except Exception:
+            logger.warning("Failed to update state for %s", issue_id, exc_info=True)
 
     def _notify_state_change(self) -> None:
         """Notify observers of a state change."""

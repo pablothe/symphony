@@ -165,15 +165,9 @@ def _build_turn_prompt(issue: Issue, turn_number: int, max_turns: int) -> str:
         return build_prompt(issue)
 
     return (
-        f"Continuation guidance:\n\n"
-        f"- The previous Claude Code turn completed normally, but the Linear issue "
-        f"is still in an active state.\n"
-        f"- This is continuation turn #{turn_number} of {max_turns} for the current agent run.\n"
-        f"- Resume from the current workspace and workpad state instead of restarting from scratch.\n"
-        f"- The original task instructions and prior turn context are already present in this "
-        f"thread, so do not restate them before acting.\n"
-        f"- Focus on the remaining ticket work and do not end the turn while the issue stays "
-        f"active unless you are truly blocked.\n"
+        f"The issue {issue.identifier} is still in state '{issue.state}'. "
+        f"This is continuation turn {turn_number}/{max_turns}. "
+        f"Continue working on the remaining tasks — do not restart from scratch."
     )
 
 
