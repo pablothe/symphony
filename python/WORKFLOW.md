@@ -1,7 +1,7 @@
 ---
 tracker:
   kind: linear
-  project_slug: "your-project-slug"
+  project_slug: "064eba412183"
   active_states:
     - Todo
     - In Progress
@@ -19,7 +19,7 @@ workspace:
   root: ~/code/symphony-workspaces
 hooks:
   after_create: |
-    git clone --depth 1 https://github.com/your-org/your-repo .
+    git clone --depth 1 https://github.com/pablothe/symphony.git .
   before_remove: |
     echo "Cleaning up workspace"
 agent:
@@ -29,7 +29,7 @@ claude_code:
   command: claude
   model: claude-sonnet-4-20250514
   max_turns: 10
-  permission_mode: accept-all
+  permission_mode: bypassPermissions
   mcp_config: null
 server:
   port: 4000
