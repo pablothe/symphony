@@ -1,0 +1,72 @@
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+._*
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+.project
+.classpath
+.settings/
+
+# Environment & secrets
+.env
+.env.*
+.secrets
+.credentials
+
+# Logs
+*.log
+logs/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# Elixir
+_build/
+deps/
+cover/
+doc/
+.elixir_ls/
+.fetch/
+erl_crash.dump
+*.ez
+
+# Misc
+*.bak
+*.tmp
+*.orig
+.cache/
+tmp/
